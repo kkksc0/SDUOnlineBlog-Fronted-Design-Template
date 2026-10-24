@@ -1,0 +1,6 @@
+interface:
+  display_name: "AI 开发日志"
+  short_description: "在已启用项目记录用户指令、代码修改与验证结果，加密保存并支持跨设备继续开发"
+  default_prompt: "使用 $ai-dev-journal 在当前已启用项目中记录本次编码任务。"
+policy:
+  allow_implicit_invocation: true
