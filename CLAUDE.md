@@ -1,5 +1,5 @@
-# 本项目规则
+<!-- ai-dev-journal:start -->
+@AGENTS.md
 
-先读取本项目根目录的 AGENTS.md，再按其中要求加载 `.agents/skills/ai-dev-journal/SKILL.md`。
-
-这些要求只用于本项目及子目录，不安装全局 skill，不修改用户级 Claude 配置。所有参考文件和执行入口都按本项目内的真实 SkillRoot 解析成绝对路径。
+AI 开发日志的共同规则在本项目 AGENTS.md。若宿主不解释 @ 导入，显式读取该文件；仅在用户确认启用后记录，不修改个人全局配置。
+<!-- ai-dev-journal:end -->

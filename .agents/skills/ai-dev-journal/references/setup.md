@@ -1,99 +1,60 @@
-# 安装、配置与迁移
+# 安装、启停与迁移
 
-## Windows 64 位：免安装运行
+## Agent 执行的一句话安装流程
 
-当前 ZIP 已包含 `bin/windows-x64/journal.exe` 及同目录 `_internal/` 运行库。完整解压即可在 Windows x64 使用，不用安装 Python、加密依赖，也不需要联网下载运行环境。不要只复制 exe；保持整个 skill 文件夹结构。
+1. 确定用户正在工作的项目绝对路径。若当前目录就是完整模板，直接使用；否则将 README 指定仓库下载或克隆到临时目录，读取其 README 和本文件。只复制本 skill 的运行资源，不覆盖目标项目业务文件。无需个人全局技能安装器。
+2. 保持完整 skill 目录。Windows x64 执行 `<来源SkillRoot>/bin/windows-x64/journal.exe doctor`，成功后执行 `install --project <目标项目绝对路径>`。安装到项目本身时也可重复执行，已有口令、授权状态和日志保持不变。
+3. macOS/Linux 先确认已有 Python 3.12+，执行 `python3 <来源SkillRoot>/scripts/bootstrap.py --project <目标项目绝对路径>`。它只用标准库引导，在目标 skill 的 `.venv` 中准备 pip/cryptography，不修改系统解释器。缺少 Python、venv/pip 或网络时报告具体缺项并保持未启用；不要安装全局依赖。
+4. 读取 install 返回的 notice 文件并向用户展示，等待确认。此时 status= pending，不能写日志；安装请求本身不算确认。若已明确拒绝，执行 disable 或维持 pending。
+5. 用户确认后，使用**目标项目内**的入口执行 `enable --project <项目绝对路径> --confirm`。该命令验证环境、口令和已有密文，向 AGENTS.md/CLAUDE.md 合并托管区块，最后写入本机启用状态。参数不能替代实际用户确认。
+6. 显式读取合并后的项目规则，运行 status 验证 enabled=true，说明记录已启用及停用口令。不要写虚构测试对话；下一条实际项目请求应产生 request/result。新会话从项目内启动，实际验证宿主会读取规则。
 
-每次新会话先让 AI 使用包内入口检查：
+安装不等于启用；init 仍可创建空白本地口令配置用于旧式手动接入，但不会授权记录。安装器使用 assets/course-config.json 中的**课程共享口令**初始化新项目，已有本地配置保留，不覆盖或自动轮换。已存在但无效/空白的配置需在本机修复后再启用。不要把安装本模板的请求理解为向所有其他项目安装。
 
-```text
-<skill目录>/bin/windows-x64/journal.exe doctor
-```
+## 统一命令
 
-返回 ready=true 即可继续。之后所有命令都使用这一个入口；项目配置与原有 `.enc` 格式不变。程序内有中文错误说明，不会静默退回明文。
+Windows 入口是 `<SkillRoot>/bin/windows-x64/journal.exe`。源码安装后用 `<SkillRoot>/.venv/bin/python <SkillRoot>/scripts/journal.py` 替代（Windows 源码开发的虚拟环境解释器在 Scripts/python.exe）。所有项目参数为绝对路径。
 
-这是命令行记录器，由 AI 调用，不是双击后显示窗口的日志阅读软件。包缺失或损坏时重新解压完整 ZIP，不自动下载安装其他程序，不修改系统 Python，不要求管理员权限。
+| 命令 | 用途 |
+| --- | --- |
+| doctor | 环境和加密自检，不读取项目配置 |
+| install --project ROOT | 复制运行资源、创建本地配置和待确认状态；不记录 |
+| status --project ROOT | 查看状态、确认是否需要告知；不输出口令或日志正文 |
+| enable --project ROOT --confirm | 仅在首次或新版告知获得真实确认后启用 |
+| enable --project ROOT | 恢复已有相同告知版本的授权，历史原样保留 |
+| disable --project ROOT | 立即停用，保留日志；无需额外确认，也不记该操作 |
+| append --project ROOT | stdin 接收 JSON；未启用则拒绝 |
+| read --project ROOT [--session UUID] | 解密显示，不生成明文文件；停用后仍可读 |
+| verify --project ROOT [--session UUID] | 校验现存密文；events=0 不代表已经记录 |
+| pack --project ROOT --output OUTSIDE.zip --logs-only | 验证并只打包 .enc；无日志则拒绝；不含授权、配置、环境文件和依赖 |
 
-此免安装包只适用于 Windows x64。macOS、Linux、Windows ARM 原生版尚未打包；这些平台仍使用源码方式，不声称开箱即用。
+停用口令：**停止记录本项目的 AI 开发日志。** 没有 Agent 时可直接运行 disable。停用等待正在发布的单条记录结束，命令成功返回后不会再发布新记录。恢复无须重新输入口令。日志管理操作不递归记录。
 
-## 其他平台或源码开发
+旧 pack（不带 --logs-only）为兼容保留，仍是全项目归档，不遵守 .gitignore，不作为作业源码打包方案。--logs-only 输出在项目外、不覆盖旧文件，拒绝日志目录中的链接；项目其他位置的依赖链接不会影响纯日志包。
 
-源码入口需要 Python 3.12+，以及 requirements.txt 中的 cryptography；仅源码用户需要安装依赖。没有 Context7 可用，因此实现依据为官方文档：
-- [Scrypt](https://cryptography.io/en/latest/hazmat/primitives/key-derivation-functions/#scrypt)
-- [AES-GCM](https://cryptography.io/en/latest/hazmat/primitives/aead/#cryptography.hazmat.primitives.ciphers.aead.AESGCM)
+## 常驻规则与宿主
 
-加密格式固定为 v1：Scrypt n=32768/r=8/p=1、32 字节密钥、每事件随机 16 字节盐；AES-256-GCM、12 字节随机 nonce；格式版本作为认证附加数据。盐和 nonce 无需保密。认证用于发现被修改的单条密文，不承诺完整历史不可删改。
+AGENTS.md 与 CLAUDE.md 使用 `<!-- ai-dev-journal:start -->` / `<!-- ai-dev-journal:end -->` 托管区块；合并保留已有项目规则。重复启用不重复追加。破损/重复标记会拒绝，保留原文件并报告。
 
-## 安装 skill
+- [Codex](https://learn.chatgpt.com/docs/build-skills)：项目 .agents/skills 及 AGENTS.md；指令链在新会话启动时建立，安装当轮需显式读取新规则。
+- [Claude Code](https://code.claude.com/docs/en/memory)：CLAUDE.md 使用 @AGENTS.md 导入；项目里已有其他 Claude 规则照常保留。共享核心不复制另一套技能。
+- [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness/blob/master/packages/context/agent-instructions/README.md)：默认项目候选 AGENTS.md/CLAUDE.md；@ 导入并非其语法，但它直接读取 AGENTS.md。关闭指令插件或缺少文件/命令能力时不能保证调用。
+- 其他宿主：由当前 Agent 根据实际支持的**项目级**常驻指令入口引用同一 SKILL，不猜测全局配置位置。验收一次真实多轮记录后再称已实测；仅提供文件不等于已适配所有宿主。
 
-保留整个 ai-dev-journal 文件夹，不只复制 SKILL.md。Windows x64 使用包内程序，无需安装依赖；其他平台源码方式才执行：
+## 加密、升级和状态
 
-```text
-python -m pip install -r <skill目录>/requirements.txt
-```
+密文格式保持 v1：每事件随机 16 字节 salt，Scrypt n=32768/r=8/p=1 生成 32 字节密钥；AES-256-GCM 使用 12 字节 nonce，格式版本作为认证附加数据。课程共享口令可逆解密，也允许知晓者重新生成密文，所以不证明真实性或完整性。
 
-- Codex：复制到个人技能目录 `~/.agents/skills/ai-dev-journal/`。可参考 [官方 skill 文档](https://developers.openai.com/codex/skills/)。
-- Claude Code：复制到 `~/.claude/skills/ai-dev-journal/`，参见 [官方 skills 文档](https://code.claude.com/docs/en/skills)。
-- DeepSeek Harness：让实际安装版本通过其 skill 加载入口载入本目录，并在项目常驻指令中加入下面规则。其扩展入口仍在演进，不假定 `.claude/skills` 会被自动扫描；必须实际确认 skill 已列出、规则已加载。参见 [官方仓库](https://github.com/deepseek-ai/deepseek-harness)。
+新版读取历史 v1 密文；新 facts 字段需要新版读取器，旧程序不保证识别。旧项目没有本机授权状态时一律待确认，已有口令和历史不改。相同告知版本的启用/停用状态在重复安装和升级中保留；告知范围实质变化需新确认。不要用老版本程序绕过启用门禁。
 
-不声称已经在以上三个宿主中完成真实会话测试。脚本可用不等于宿主自动触发已验证。
+`ai-dev-journal.local.json` 与 `ai-dev-journal.state.local.json` 默认 Git 忽略；本地状态不是防伪授权凭证。安装/启用检测到它们已被跟踪会拒绝。无 Git 时只能写忽略规则，不能证明未跟踪。共享课程口令本身公开在分发资源中，本地配置仍不随日志包发送。
 
-## 每个项目初始化一次
+自己的设备迁移可单独传递口令配置，再在新设备确认启用；发给另一个人时不复制授权状态。程序不自动换密或重加密已有历史，也不提供密码找回。
 
-```text
-<skill目录>/bin/windows-x64/journal.exe init --project <项目绝对路径>
-```
+## 故障恢复
 
-若已经持有自己的密码配置，先将它放进业务项目根目录，再运行 init；已有配置不会被覆盖，不需要重复输入密码。不要复制别人的配置。以下命令以 Windows 入口为例，源码用户替换为 `python <skill目录>/scripts/journal.py`，参数相同。
+先确认 doctor 成功、status enabled=true。普通记录失败同 ID 同输入重试一次，仍失败报告缺口并继续任务；恢复只补可核对事实，不伪造原始时间或历史。
 
-初始化会向 .gitignore 追加规则，保留既有内容。尚无配置时才创建密码留空的 `ai-dev-journal.local.json`，由你在本地编辑器填写：
+强制退出可能遗留根目录 `.ai-dev-journal.control.lock`、事件 `<event_id>.lock` 空目录或 `.pending-*` 密文临时文件。确认没有运行进程、备份日志后，人工检查并移除对应空锁再重试；不删除已有 .enc。程序普通异常自动清理。控制锁使停用与发布协调，但不是跨设备同步机制。
 
-```json
-{"version": 1, "password": "在本机填入你自己的长口令"}
-```
-
-不使用本说明中的示例文字当作真实口令；不要把真实口令发给 AI。脚本拒绝空密码与样例密码。配置只保存版本和口令，日志格式参数固定，不可通过配置降低强度。
-
-若配置已被 Git 跟踪，添加忽略也不能撤回跟踪或历史：先处理仓库中的泄露并更换口令。Git 可用时，脚本检测到已跟踪的标准名称配置会拒绝初始化；没有 Git 时仅添加忽略规则，不能证明未跟踪。更换密码不会自动重加密旧日志；第一版不提供轮换，旧配置需保留以读取旧日志，勿直接替换。
-
-项目规则（合并进 Codex 的 AGENTS.md、Claude Code 的 CLAUDE.md，以及 Harness 当前版本支持的常驻项目指令，别覆盖原内容）：
-
-```markdown
-## 开发过程日志
-若项目根目录存在 ai-dev-journal.local.json，所有编码任务使用 ai-dev-journal skill。
-先加载该 skill 的 SKILL.md，按规则记录用户指令、重要修改与每轮结果；任务开始即写 request，交付前追加 result。
-不要在普通回复中额外播报日志操作，不读取或输出密码配置；让写入脚本自行读取。
-Windows x64 直接调用 skill 内 bin/windows-x64/journal.exe，不要求额外安装 Python 或依赖。
-每次新会话先执行 doctor 进行环境自检。
-不记录记录器自身动作；不自动复盘。失败重试一次仍失败时简短报告。
-```
-
-安装后重开会话，验证普通编码请求能实际触发记录。宿主强制要求宣布 skill 使用时优先遵守宿主规则，不能保证隐藏所有工具操作。
-
-## 自己的设备之间传输
-
-复制项目（包含密文日志），并通过你信任的渠道单独复制同一份 `ai-dev-journal.local.json` 到新设备项目根目录。新设备安装完整 skill 并加载项目规则；Windows x64 直接用包内程序，不再安装 Python 或依赖。没有配置也可重新创建并填同一口令；无需找回私钥。切换设备的 skill 包和项目规则仍须存在，不能只复制日志。
-
-本机配置是明文保存的口令。项目内的 AI、程序及有文件读取权限的人技术上可以读取它，skill 的“不读取”规则不是访问控制。备份要包含口令，发给其他人的包必须排除口令。
-
-若系统在写入时强制退出，可能遗留 `<event_id>.lock` 空目录或 `.pending-*` 密文临时文件。脚本不会自动删除锁。确认没有写入进程后，先备份日志目录，再人工检查并移除对应空锁后复用原事件 ID 重试；不得删除已有 `.enc`。普通异常会自动清理。verify 只检查已经发布的 `.enc` 文件，不把尚未发布的临时文件算成成功记录。
-
-## 查看和检查
-
-```text
-<skill目录>/bin/windows-x64/journal.exe read --project <项目路径>
-<skill目录>/bin/windows-x64/journal.exe read --project <项目路径> --session <UUID>
-<skill目录>/bin/windows-x64/journal.exe verify --project <项目路径>
-```
-
-read 解密后只输出终端，不写明文文件；如在 AI 工具中执行，正文可能进入该工具的历史记录。verify 只报告通过数量，不展示正文。
-
-## 对外分享
-
-```text
-<skill目录>/bin/windows-x64/journal.exe pack --project <项目路径> --output <项目外的新ZIP路径>
-```
-
-pack 不区分大小写地排除所有同名本地密码配置及 .git 文件/目录，保留加密日志；遇到符号链接或 Windows junction 拒绝打包，避免带入外部文件。输出不得在项目内，不覆盖既有文件。此命令不是通用秘密扫描器，不处理项目自身其他密钥。
-
-Windows 或其他压缩软件直接压缩文件夹不会遵守 .gitignore。对外 pack 包不能自动解密，自己的设备应另行传配置。未加密旧日志、编辑器备份、对话记录和已提交的密码不会被本工具自动清理。
+源码重新构建 Windows 包使用仓库 scripts/build_windows.ps1。构建在独立 .build-journal 环境完成，并更新源码/程序哈希与实际依赖版本，重建后必须跑真实程序测试。

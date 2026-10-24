@@ -3,7 +3,9 @@
 *.yaml text eol=lf
 *.json text eol=lf
 *.txt text eol=lf
+*.ps1 text eol=lf
 *.exe binary
 *.dll binary
 *.pyd binary
 *.zip binary
+.agents/skills/ai-dev-journal/bin/windows-x64/_internal/** -text

@@ -3,6 +3,7 @@ import argparse
 import base64
 import json
 import os
+from contextlib import contextmanager
 from pathlib import Path
 import re
 import subprocess
@@ -24,6 +25,11 @@ except ImportError:
     raise SystemExit("源码版缺少加密依赖；Windows 用户请运行包内 bin/windows-x64/journal.exe。其他平台需安装 requirements.txt 中的依赖。") from None
 
 CONFIG = "ai-dev-journal.local.json"
+STATE = "ai-dev-journal.state.local.json"
+CONTROL_LOCK = ".ai-dev-journal.control.lock"
+SKILLDIR = Path(".agents/skills/ai-dev-journal")
+DISCLOSURE_VERSION = 1
+PACKAGE_VERSION = "2.0.0"
 LOGDIR = Path("docs/engineering/ai-worklog")
 AAD = b"ai-dev-journal:v1:scrypt-32768-8-1:aes256gcm"
 MAX_BYTES = 2 * 1024 * 1024
@@ -54,10 +60,10 @@ def validate(event):
         uuid_text(event[key])
     if event["kind"] not in ("request", "progress", "correction", "result"):
         raise JournalError("Invalid event kind")
-    if event["tool"] not in ("codex", "claude-code", "deepseek-harness", "other"):
+    if not isinstance(event["tool"], str) or not re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,63}", event["tool"]):
         raise JournalError("Invalid tool")
     data = event["data"]
-    if not isinstance(data, dict) or set(data) - TEXT - LIST - {"checks", "status"}:
+    if not isinstance(data, dict) or set(data) - TEXT - LIST - {"checks", "status", "facts"}:
         raise JournalError("Unknown data fields")
     for key, value in data.items():
         if key in TEXT and not isinstance(value, str):
@@ -82,6 +88,15 @@ def validate(event):
                 or not all(isinstance(x, str) for x in item.values())
                 or item["status"] not in ("passed", "failed", "not_run")):
             raise JournalError("Each check requires name, status, evidence")
+    facts = data.get("facts", [])
+    if not isinstance(facts, list):
+        raise JournalError("facts must be a list")
+    for fact in facts:
+        if (not isinstance(fact, dict) or set(fact) != {"actor", "summary", "source", "reference"}
+                or not all(isinstance(x, str) and x.strip() for x in fact.values())
+                or fact["actor"] not in ("user", "agent", "unknown")
+                or fact["source"] not in ("user_statement", "tool_result", "artifact")):
+            raise JournalError("Each fact requires actor, summary, source, reference")
     if len(json.dumps(event, ensure_ascii=False).encode("utf-8")) > MAX_BYTES:
         raise JournalError("Event exceeds 2 MiB limit")
 
@@ -132,6 +147,19 @@ def redact(value, password):
     return value
 
 
+def redact_data(data, password):
+    clean = redact(data, password)
+    # Only free text is sensitive payload; schema enums and UUID references are metadata.
+    for key in ("status", "related_event_ids"):
+        if key in data:
+            clean[key] = data[key]
+    for original, updated in zip(data.get("checks", []), clean.get("checks", [])):
+        updated["status"] = original["status"]
+    for original, updated in zip(data.get("facts", []), clean.get("facts", [])):
+        updated["actor"], updated["source"] = original["actor"], original["source"]
+    return clean
+
+
 def event_path(project, session_id, event_id):
     return safe_path(project, LOGDIR / uuid_text(session_id) / (uuid_text(event_id) + ".enc"))
 
@@ -169,6 +197,15 @@ def decrypt(path, password):
 
 
 def append_event(project, event):
+    # Serialize disable with publication: once disable returns, no earlier writer can publish.
+    with control_lock(project):
+        state = load_state(project)
+        if state["status"] != "enabled" or not current_consent(state):
+            raise JournalError("记录尚未启用或已停用；请先告知用户并确认，或按用户要求恢复记录。")
+        return _append_event(project, event)
+
+
+def _append_event(project, event):
     validate(event)
     password = password_for(project)
     # Catch a mistyped/replaced password before mixing incompatible events in a project.
@@ -178,7 +215,7 @@ def append_event(project, event):
         safe_path(project, first.relative_to(Path(project).resolve()))
         decrypt(first, password)
     # Redact text payload only; identifiers and enums must remain stable.
-    clean = dict(event, data=redact(event["data"], password))
+    clean = dict(event, data=redact_data(event["data"], password))
     if clean["data"] != event["data"]:
         clean["data"].setdefault("redactions", []).append("自动替换了明确凭据或本地口令")
     validate(clean)
@@ -239,42 +276,50 @@ def read_events(project, session=None):
     return sorted(events, key=lambda e: (e["recorded_at"], e["event_id"]))
 
 
-def init_project(project):
+def init_project(project, template=None):
     root = Path(project).resolve(strict=True)
     cfg = safe_path(root, CONFIG)
     ignore = safe_path(root, ".gitignore")
     try:
-        result = subprocess.run(["git", "-C", str(root), "ls-files", "--", CONFIG],
+        result = subprocess.run(["git", "-C", str(root), "ls-files", "--", CONFIG, STATE],
                                 capture_output=True, check=False)
         if result.returncode == 0 and result.stdout.strip():
-            raise JournalError("Local config is tracked by Git; resolve that before initialization")
+            raise JournalError("本地口令或授权状态已被 Git 跟踪；请先取消跟踪，再初始化。")
     except FileNotFoundError:
         pass
     if not cfg.exists():
+        content = json.loads(Path(template).read_text(encoding="utf-8-sig")) if template else {"version": 1, "password": ""}
         with cfg.open("x", encoding="utf-8") as handle:
-            json.dump({"version": 1, "password": ""}, handle)
+            json.dump(content, handle, ensure_ascii=False)
         if os.name != "nt":
             cfg.chmod(0o600)
     # Appended last: override any earlier negation. Not an archive exclusion.
     current = ignore.read_text(encoding="utf-8-sig") if ignore.exists() else ""
-    rule = "\n# Local AI journal password (not for sharing)\nai-dev-journal.local.json\n"
+    rule = ("\n# AI journal: local password, consent and runtime\n" + CONFIG + "\n" + STATE + "\n"
+            + CONTROL_LOCK + "/\n.agents/skills/ai-dev-journal/.venv/\n")
     if not current.endswith(rule):
         with ignore.open("a", encoding="utf-8", newline="\n") as handle:
             handle.write(rule)
     return {"initialized": True, "config": CONFIG, "password_configured": bool(json.loads(cfg.read_text(encoding="utf-8-sig")).get("password"))}
 
 
-def pack(project, output):
+def pack(project, output, logs_only=False):
     root = Path(project).resolve(strict=True)
     output = Path(output).resolve()
     if output.is_relative_to(root):
         raise JournalError("Archive must be outside project")
     files = []
-    for directory, dirs, names in os.walk(root, followlinks=False):
+    walkroot = safe_path(root, LOGDIR) if logs_only else root
+    if logs_only:
+        events = read_events(root)  # authenticate before creating a submission
+        if not events:
+            raise JournalError("没有可提交的加密日志；不会创建空的日志包。")
+    for directory, dirs, names in os.walk(walkroot, followlinks=False):
         dirs[:] = [d for d in dirs if d.casefold() != ".git"]
         for name in dirs + names:
             path = safe_path(root, (Path(directory) / name).relative_to(root))
-            if name.casefold() not in (CONFIG, ".git") and path.is_file():
+            if (name.casefold() not in (CONFIG, STATE, ".git") and path.is_file()
+                    and (not logs_only or path.suffix == ".enc")):
                 files.append(path)
     # Never follow links, never replace an existing archive. Remove incomplete output on failure.
     created = False
@@ -289,7 +334,194 @@ def pack(project, output):
         if created:
             output.unlink(missing_ok=True)
         raise
-    return {"packed": True, "files": len(files), "excluded": [CONFIG, ".git"]}
+    return {"packed": True, "files": len(files), "logs_only": logs_only, "excluded": [CONFIG, STATE, ".git"]}
+
+
+def package_root():
+    return Path(sys.executable).resolve().parents[2] if getattr(sys, "frozen", False) else Path(__file__).resolve().parents[1]
+
+
+@contextmanager
+def control_lock(project):
+    lock = safe_path(project, CONTROL_LOCK)
+    deadline = time.monotonic() + 10
+    while True:
+        try:
+            lock.mkdir()
+            break
+        except FileExistsError:
+            if time.monotonic() >= deadline:
+                raise JournalError("日志状态正被占用；确认没有记录进程后检查项目根目录的 control.lock 空目录。")
+            time.sleep(0.05)
+    try:
+        yield
+    finally:
+        lock.rmdir()
+
+
+def timestamp():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def load_state(project):
+    path = safe_path(project, STATE)
+    if not path.exists():
+        return {"version": 1, "status": "pending", "disclosure_version": None, "consented_at": None}
+    try:
+        state = json.loads(path.read_text(encoding="utf-8-sig"))
+        if (not isinstance(state, dict) or state.get("version") != 1
+                or state.get("status") not in ("pending", "enabled", "disabled")):
+            raise ValueError()
+        for key in ("consented_at", "updated_at"):
+            if state.get(key) is not None and datetime.fromisoformat(state[key]).tzinfo is None:
+                raise ValueError()
+        return state
+    except (ValueError, TypeError, KeyError):
+        raise JournalError("本地授权状态无效；不会默认启用，请重新告知并确认。") from None
+
+
+def current_consent(state):
+    return state.get("disclosure_version") == DISCLOSURE_VERSION and bool(state.get("consented_at"))
+
+
+def atomic_write(path, content):
+    fd, name = tempfile.mkstemp(prefix=".journal-update-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(name, path)
+    finally:
+        Path(name).unlink(missing_ok=True)
+
+
+def save_state(project, state):
+    state = dict(state, version=1, updated_at=timestamp())
+    atomic_write(safe_path(project, STATE), json.dumps(state, ensure_ascii=False, indent=2).encode("utf-8"))
+
+
+def status_project(project):
+    state = load_state(project)
+    cfg = safe_path(project, CONFIG)
+    configured = False
+    if cfg.exists():
+        try:
+            password_for(project)
+            configured = True
+        except JournalError:
+            pass
+    return {"status": state["status"], "enabled": state["status"] == "enabled" and current_consent(state) and configured,
+            "consent_required": not current_consent(state), "disclosure_version": DISCLOSURE_VERSION,
+            "consented_at": state.get("consented_at"), "password_configured": configured,
+            "skill_installed": safe_path(project, SKILLDIR / "SKILL.md").is_file(),
+            "scope": "current_project_conversations", "package_version": PACKAGE_VERSION}
+
+
+def managed_content(original, body):
+    start, end = "<!-- ai-dev-journal:start -->", "<!-- ai-dev-journal:end -->"
+    block = start + "\n" + body.strip() + "\n" + end
+    if start in original or end in original:
+        if original.count(start) != 1 or original.count(end) != 1 or original.index(start) > original.index(end):
+            raise JournalError("项目指令的日志托管区块不完整；请修复标记后重试，不覆盖其他规则。")
+        left = original.index(start)
+        right = original.index(end) + len(end)
+        return original[:left] + block + original[right:]
+    return original + ("\n\n" if original and not original.endswith("\n\n") else "") + block + "\n"
+
+
+def merge_rules(project):
+    prepared = []
+    for name in ("AGENTS", "CLAUDE"):
+        target = safe_path(project, name + ".md")
+        original = target.read_bytes() if target.exists() else None
+        # Preserve existing line endings and bytes outside our marked block.
+        text = original.decode("utf-8-sig") if original is not None else ""
+        body = (package_root() / "assets" / (name + ".block.md")).read_text(encoding="utf-8")
+        newline = "\r\n" if "\r\n" in text else "\n"
+        updated = managed_content(text, body).replace("\r\n", "\n").replace("\n", newline)
+        if original is not None and original.startswith(b"\xef\xbb\xbf"):
+            updated = "\ufeff" + updated
+        prepared.append((target, original, updated.encode("utf-8")))
+    changed = []
+    try:
+        for target, original, updated in prepared:
+            if original != updated:
+                atomic_write(target, updated)
+                changed.append((target, original))
+    except OSError:
+        for target, original in reversed(changed):
+            if original is None:
+                target.unlink(missing_ok=True)
+            else:
+                atomic_write(target, original)
+        raise
+
+
+def enable_project(project, confirmed=False):
+    with control_lock(project):
+        state = load_state(project)
+        if not current_consent(state) and not confirmed:
+            raise JournalError("需要先展示 references/notice.md 并取得用户确认，再执行 enable --confirm。")
+        if not safe_path(project, SKILLDIR / "SKILL.md").is_file():
+            raise JournalError("请先运行 install 为当前项目安装完整 skill。")
+        init_project(project)  # retain Git tracking protection on every activation
+        password_for(project)
+        read_events(project)  # refuse activation with a key that cannot read existing history
+        doctor()
+        merge_rules(project)
+        if not current_consent(state):
+            state.update(disclosure_version=DISCLOSURE_VERSION, consented_at=timestamp())
+        state.update(status="enabled")
+        save_state(project, state)  # activation is last, after both instruction files succeed
+    return status_project(project)
+
+
+def disable_project(project):
+    with control_lock(project):
+        try:
+            state = load_state(project)
+        except JournalError:
+            state = {"version": 1, "disclosure_version": None, "consented_at": None}
+        state["status"] = "disabled"
+        save_state(project, state)
+    return {"status": "disabled", "enabled": False, "history_preserved": True}
+
+
+def install_project(project):
+    source = package_root()
+    destination = safe_path(project, SKILLDIR)
+    # Only ship runtime resources, never source-checkout logs, tests, caches or consent.
+    members = ("SKILL.md", "requirements.txt", "scripts", "references", "agents", "assets", "bin")
+    copies = []
+    for member in members:
+        base = safe_path(source, member)
+        if not base.exists():
+            raise JournalError("分发包不完整；请重新获取完整仓库或发布包。")
+        for directory, dirs, files in os.walk(base) if base.is_dir() else []:
+            dirs[:] = [name for name in dirs if name not in ("__pycache__", ".venv")]
+            for name in dirs + files:
+                item = safe_path(source, (Path(directory) / name).relative_to(source))
+                if item.is_file() and item.suffix != ".pyc":
+                    copies.append((item, safe_path(project, SKILLDIR / item.relative_to(source))))
+        if base.is_file():
+            copies.append((base, safe_path(project, SKILLDIR / member)))
+    doctor()
+    with control_lock(project):
+        state = load_state(project)
+        init_project(project, source / "assets/course-config.json")
+        if destination != source:
+            for src, dest in copies:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                if not dest.exists() or src.read_bytes() != dest.read_bytes():
+                    atomic_write(dest, src.read_bytes())
+        if not safe_path(project, STATE).exists():
+            save_state(project, state)
+        if state["status"] == "enabled" and current_consent(state):
+            merge_rules(project)
+    report = status_project(project)
+    report.update(installed=True, notice=str(destination / "references/notice.md"))
+    return report
 
 
 def doctor():
@@ -309,19 +541,30 @@ def main():
     parser = argparse.ArgumentParser(description="AI 开发日志：加密记录、读取、校验与安全打包。Windows 免安装版已自带运行环境。")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("doctor", help="检查运行环境和加密能力，不读取密码或写入日志")
-    for command in ("init", "append", "read", "verify", "pack"):
+    for command in ("init", "install", "enable", "disable", "status", "append", "read", "verify", "pack"):
         cmd = sub.add_parser(command)
         cmd.add_argument("--project", required=True)
         if command in ("read", "verify"):
             cmd.add_argument("--session")
         if command == "pack":
             cmd.add_argument("--output", required=True)
+            cmd.add_argument("--logs-only", action="store_true")
+        if command == "enable":
+            cmd.add_argument("--confirm", action="store_true", help="仅在已展示告知且用户明确确认后使用；此参数本身不是用户同意的证据")
     args = parser.parse_args()
     try:
         if args.command == "doctor":
             result = doctor()
         elif args.command == "init":
             result = init_project(args.project)
+        elif args.command == "install":
+            result = install_project(args.project)
+        elif args.command == "enable":
+            result = enable_project(args.project, args.confirm)
+        elif args.command == "disable":
+            result = disable_project(args.project)
+        elif args.command == "status":
+            result = status_project(args.project)
         elif args.command == "append":
             raw = sys.stdin.buffer.read(MAX_BYTES + 1)
             if len(raw) > MAX_BYTES:
@@ -331,10 +574,14 @@ def main():
             events = read_events(Path(args.project).resolve(), args.session)
             result = events if args.command == "read" else {"verified": True, "events": len(events)}
         else:
-            result = pack(args.project, args.output)
+            result = pack(args.project, args.output, args.logs_only)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
-    except (JournalError, OSError, ValueError, TypeError):
+    except JournalError as error:
+        # These are fixed application messages, never interpolated user input or secrets.
+        print(str(error), file=sys.stderr)
+        return 1
+    except (OSError, ValueError, TypeError):
         # Never echo input, password, plaintext, or a library exception containing secrets.
         print("日志操作未完成：请检查本地密码配置、事件格式、写入权限及密文完整性。没有转存明文。", file=sys.stderr)
         return 1

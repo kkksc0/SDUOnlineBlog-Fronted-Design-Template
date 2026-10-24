@@ -1,11 +1,11 @@
 {
-  "package_version": "1.1.0",
+  "package_version": "2.0.0",
   "platform": "windows-x64",
-  "release_date": "2026-10-23",
+  "release_date": "2026-10-24",
   "builder": "PyInstaller 6.22.3 onedir",
-  "python": "3.13.7",
+  "python": "3.13.12",
   "cryptography": "46.0.7",
   "encrypted_format_version": 1,
-  "source_sha256": "b432c28472c7d6fb86f92f79158e19cf4d3e8b448ae3ba40b6f6ecb6634740b5",
-  "exe_sha256": "fff0e55675ec978e6aee13325451d6c168b348da1db5661dd5bde607dcfcdd3b"
+  "source_sha256": "4bffd5805280409997062791c9678b6f8416dc5ae664e7d31729c1f4b686e0f6",
+  "exe_sha256": "f8240f5ec6660872101f8c849bfe99284223524608fabda30ffc4761a61a9677"
 }

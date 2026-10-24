@@ -1,4 +1,7 @@
 ai-dev-journal.local.json
+ai-dev-journal.state.local.json
+.ai-dev-journal.control.lock/
+.agents/skills/ai-dev-journal/.venv/
 __pycache__/
 *.pyc
 .DS_Store

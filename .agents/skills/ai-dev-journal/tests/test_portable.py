@@ -23,8 +23,14 @@ class PortableTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="portable-test-", dir=Path(__file__).parent) as temp:
             base = Path(temp)
             relocated = base / "另一台设备 skill"
-            shutil.copytree(BUNDLE, relocated)
-            exe = relocated / "journal.exe"
+            for member in ("SKILL.md", "requirements.txt", "assets", "agents", "references", "scripts", "bin"):
+                src, dest = SKILL / member, relocated / member
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                if src.is_dir():
+                    shutil.copytree(src, dest, ignore=shutil.ignore_patterns("__pycache__"))
+                else:
+                    shutil.copy2(src, dest)
+            exe = relocated / "bin/windows-x64/journal.exe"
             project = base / "业务项目"
             project.mkdir()
             env = os.environ.copy()
@@ -44,9 +50,13 @@ class PortableTests(unittest.TestCase):
             check = run("doctor")
             self.assertTrue(check["ready"])
             self.assertTrue(check["bundled"])
-            run("init", "--project", str(project))  # no Git or Python on PATH
+            pending = run("install", "--project", str(project))  # no Git or Python on PATH
+            self.assertFalse(pending["enabled"])
+            self.assertFalse((project / "AGENTS.md").exists())
+            run("enable", "--project", str(project), success=False)
             password = "temporary-portable-test-passphrase"
             (project / j.CONFIG).write_text(json.dumps({"version": 1, "password": password}), encoding="utf-8")
+            run("enable", "--project", str(project), "--confirm")
             original = dict(event_id=str(uuid4()), session_id=str(uuid4()), task_id=str(uuid4()),
                             turn_id=str(uuid4()), kind="request", tool="codex",
                             data={"user_text": "源码版原有中文日志，跨设备继续", "status": "in_progress"})
@@ -61,15 +71,21 @@ class PortableTests(unittest.TestCase):
             self.assertTrue(run("append", "--project", str(project), data=followup)["duplicate"])
             self.assertEqual(len(j.read_events(project)), 2)  # source reads bundled output
             self.assertEqual(run("verify", "--project", str(project))["events"], 2)
+            run("disable", "--project", str(project))
+            run("append", "--project", str(project), data=dict(followup, event_id=str(uuid4())), success=False)
+            self.assertEqual(len(run("read", "--project", str(project))), 2)
+            self.assertTrue(run("enable", "--project", str(project))["enabled"])
             out = base / "share.zip"
             nested = project / "nested"
             nested.mkdir()
             (nested / j.CONFIG.upper()).write_text("excluded-test-secret")
-            run("pack", "--project", str(project), "--output", str(out))
+            (project / ".env").write_text("FAKE_TEST_SECRET=not-real")
+            run("pack", "--project", str(project), "--output", str(out), "--logs-only")
             with zipfile.ZipFile(out) as archive:
                 self.assertNotIn(j.CONFIG, archive.namelist())
                 self.assertFalse(any(j.CONFIG in name.casefold() for name in archive.namelist()))
                 self.assertTrue(any(n.endswith(".enc") for n in archive.namelist()))
+                self.assertTrue(all(n.endswith(".enc") for n in archive.namelist()))
             (project / j.CONFIG).write_text(json.dumps({"version": 1, "password": "incorrect"}), encoding="utf-8")
             failure = run("read", "--project", str(project), success=False)
             self.assertEqual(failure.stdout, b"")

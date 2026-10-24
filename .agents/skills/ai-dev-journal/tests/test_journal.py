@@ -28,6 +28,9 @@ class JournalTests(unittest.TestCase):
         j.init_project(self.project)
         self.password = "disposable-test-password-中文"
         self.configure(self.project, self.password)
+        (self.project / j.SKILLDIR).mkdir(parents=True)
+        (self.project / j.SKILLDIR / "SKILL.md").write_text("Test skill fixture")
+        j.enable_project(self.project, confirmed=True)
 
     def configure(self, project, password):
         (project / j.CONFIG).write_text(json.dumps({"version": 1, "password": password}), encoding="utf-8")

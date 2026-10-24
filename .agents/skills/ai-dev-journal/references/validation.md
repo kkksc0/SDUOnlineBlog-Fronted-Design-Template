@@ -1,53 +1,62 @@
-# 验证记录
+# v2.0 验证记录
 
-日期：2026-10-23。环境：Windows、Python 3.13、cryptography 46.0.7。
+日期：2026-10-24。此记录区分程序测试、宿主实测和未验证项目，不把说明文档当作自动触发证据。
 
-## 已验证
+## 程序与分发
 
-skill-creator 自带 quick_validate：通过。
+| 环境 | 结果 |
+| --- | --- |
+| Windows，源码 Python 3.13.12 / cryptography 46.0.5 | 34 项：33 通过，1 项真实符号链接测试因权限跳过 |
+| Ubuntu WSL，Python 3.12.3 / cryptography 46.0.7 | 34 项：33 通过，1 项 Windows 专用免安装测试跳过；真实符号链接检查通过 |
+| Windows x64 新运行包 | PyInstaller 6.22.3，Python 3.13.12，cryptography 46.0.7；doctor 通过，源码与 exe SHA256 匹配 BUILD-INFO.json |
+| skill-creator quick_validate | 通过；本地 Markdown 引用均有效 |
 
-初版自动化测试共 15 项：14 通过，1 跳过：
-- 中文、多行指令、命令样式文字作为数据；密文不包含正文或密码。
-- 跨目录模拟设备迁移，仅同一口令即可继续读写，不依赖私钥。
-- 同事件重试去重、不同内容冲突拒绝。
-- 同事件并发写入、不同会话并发写入。
-- 错误密码读取失败；错误密码向已有日志追加失败。
-- 密文篡改拒绝解密。
-- 明确凭据自动替换、脱敏后的重试保持一致。
-- 原始 .gitignore 内容保留，对外 ZIP 保留密文并排除根目录及嵌套密码配置。
-- Git worktree 的 .git 文件不打包。
-- 路径逃逸、无效检查状态拒绝且不生成日志。
-- 中断 request 保留未完成；模拟发布失败后没有残缺日志或遗留锁。
-- stdin 写入与错误输出不回显输入秘密。
-- Windows junction 拒绝分支通过模拟验证；真实符号链接测试因当前设备权限不足跳过。
+回归覆盖：加密读写、篡改/错误口令、并发与去重、原子发布失败恢复、凭据脱敏，以及以下新增行为：
 
-## 独立审查与修正
+- 首次告知门禁、拒绝/停用、恢复沿用授权、告知版本变化重新确认、损坏状态可以停用。
+- 新安装与重复安装；已有口令、授权时间、密文和原项目规则保留；BOM/CRLF 规则合并、损坏托管标记拒绝、写入第二份规则失败时回滚第一份。
+- 旧 v1 密文未启用也可读取，新增写入需要确认；Git 已跟踪的本地配置阻止启用。
+- facts 字段的主体和来源校验，已有口令与元数据同名时脱敏不破坏固定标识。
+- 多轮配对、新会话与明确任务关联、未收尾 request；停用等待在途发布，返回后拒绝后续写入。
+- logs-only 包仅包含有效 .enc；排除口令、授权、.env、依赖和临时文件；空日志/损坏日志不生成提交包。
+- Windows 完整包移至中文路径，子进程 PATH 为空，PYTHONHOME/PYTHONPATH 指向不存在目录：实际完成安装、待确认、启用、读写、去重、停用/恢复、校验和纯日志打包。
 
-独立只读审查指出：错误口令可能混写、Python 版本与 junction 检查不符、强制退出后的锁恢复未说明。现已增加已有密文口令校验、要求 Python 3.12+、补充锁恢复步骤。审查未读取真实密码配置。
+Ubuntu 实际执行 bootstrap，从空项目创建独立 .venv、安装依赖并停在 pending；未修改系统 Python。macOS 没有实机验证。系统没有 Python、离线下载失败等路径有明确错误处理，但未在所有系统逐一实测。
 
-## Windows x64 免安装版
+复现程序测试：在 skill 目录运行 `python -B -X utf8 -m unittest discover -s tests -v`。Windows 构建使用仓库 `scripts/build_windows.ps1`，依赖版本位于 `scripts/requirements-build.txt`；构建和旧包备份仅在被忽略的 .build-journal 中。
 
-使用 PyInstaller 6.22.3 onedir 打包，运行时包含 Python 3.13.7 与 cryptography 46.0.7；源码和密文格式保持兼容。打包方法依据 [PyInstaller 官方文档](https://pyinstaller.org/en/stable/operating-mode.html)。`bin/windows-x64/BUILD-INFO.json` 记录源码及 exe SHA256。构建环境在工作区，不修改系统 Python。
+## Codex 真实宿主验收
 
-新增运行环境 doctor 自检和免安装集成测试。集成测试把 exe 和运行库复制到另一个中文路径，子进程 PATH 为空、PYTHONHOME 和 PYTHONPATH 指向不存在的目录，从业务项目目录调用，验证：
-- doctor 报告自包含环境与加密自检通过，不读取真实密码配置。
-- 无 Python/Git 命令可用时完成 init。
-- 读取源码版产生的旧日志，免安装版追加后源码也能读取。
-- append 去重、verify 校验、pack 排除配置、错误密码拒绝且不输出部分正文。
-- 独立审查发现大小写变化的配置名可能被打包；已修复为不区分大小写，并对源码及实际 exe 增加回归测试。
+在仓库 .build-journal/host-test 独立测试项目执行五个用户轮次，使用本机 Codex CLI 的实际工具能力：
 
-最终测试共 18 项：17 通过、1 项真实符号链接权限测试跳过；skill 结构检查通过。
+1. 一句话安装：生成 pending 配置、展示告知并等待确认，0 条日志。
+2. 明确确认：enabled=true，合并并读取项目规则；管理操作保持 0 条。
+3. 只解释 ==/===，禁止改业务文件和运行测试：产生配对 request/result。
+4. 新建宿主会话，没有显式提醒记录；用户自述“懂了、另一台电脑做完练习”但未提供代码：自动记录第二组 request/result。原话和事实标为 user_statement；结束记录明确无法核对练习完成情况，没有推导为掌握或独立完成。
+5. 一句话停用：disabled，保留 4 条历史，不为停用操作添加事件。
 
-当前仅提供 Windows x64 免安装版，未在没有 Python 的第二台实体电脑或虚拟机运行；这里的无 Python 验证为受控子进程环境与路径迁移测试。macOS/Linux/Windows ARM 原生版没有打包。运行时完整目录必须随 skill 携带；免安装不等于宿主能百分百自动触发。
+共 2 个日志 session、2 个配对 turn。首轮个别探索命令失败，以及新会话误向 doctor 传 --project、首次 UUID 生成工具不可用等实际失败未删除；宿主自行修正后完成，并在结果中注明自己的操作失败。SKILL 后续明确 doctor 不带 --project，避免同类误用。
 
-## 未验证和边界
+## DeepSeek Harness 真实宿主验收
 
-- 没有在 Codex、Claude Code、DeepSeek Harness 三个宿主分别执行真实多轮开发；接入说明不能当作自动触发验收。
-- 模拟设备迁移不等于在第二台实体设备实测。
-- 配置文件是本地明文口令，Git 忽略不是访问控制，也不会影响普通压缩软件。
-- 单条认证加密不能可靠发现整条删除、历史回滚或完整日志目录被替换。
-- 密码强度影响抗猜测能力；不提供口令找回或第一版自动轮换。
-- `read` 会将解密正文显示在终端，可能被宿主对话历史保存。
-- 无法承诺 skill 每轮必然被宿主调用，亦无法记录不可见上下文。
+使用本机 `dsh --profile headless`，在独立 .build-journal/dsh-host-test 项目连续执行四个请求；每次 headless 进程重新加载项目上下文：
 
-复现：在 skill 目录运行 `python -X utf8 -m unittest discover -s tests -v`。
+1. 从本地完整分发包安装，实际状态 pending、0 条记录，展示告知等待确认。
+2. 明确确认后启用并加载共同规则，0 条记录。
+3. 未显式提醒日志，要求解释 map/forEach 并附带理解自述：产生 request/result，用户自述与实际检查分开记录。
+4. 一句话停用后状态 disabled，历史仍为 2 条。
+
+CLI 最终回复与程序回读一致。初测发现把“准备发送的最终回复”误标为 artifact 文件证据；已明确 artifact 必须指实际文件，回答摘要应写入 changes/decisions。使用相同任务在新 headless 进程复测：新 result 把回答表述为“已准备”，facts 仅保留 user_statement，未声称已送达或已验收。原错误记录保留，复测后共 4 条事件、2 个日志 session；验收程序最后恢复停用。
+
+验收没有保存宿主内部推理流，只保留最终回复、状态和退出结果。
+
+## 边界与证据
+
+- Claude Code：共同规则和 @AGENTS.md 导入已实现；本机无可用 Claude CLI，未声称完成真实会话验证。
+- 其他 Agent：提供项目级通用接入说明；不声称全部宿主均自动识别。
+- 本机副本、受控运行环境和 WSL 验证不等于第二台物理设备或 macOS 实测。
+- 常驻规则不强制宿主每轮执行；字段校验不证明语义真实，学习判断仍由教师结合原始证据完成。
+- 课程口令可逆解密，不提供同学之间保密或历史不可伪造、不可删除保证。
+- 日志测试全部为隔离案例；模板根目录未生成真实本地口令或启用状态，未向其他业务项目或全局安装。
+
+本地详细证据在被 Git 忽略的 .build-journal：acceptance-summary.json、host-phase1–5.jsonl/txt、dsh-phase1–4.txt 和 dsh-lifecycle-results.json、dsh-facts-retest.txt。用于复查测试，不随分发包提交。远程一句话安装以仓库已发布版本为准。
